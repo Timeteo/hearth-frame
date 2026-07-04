@@ -1,6 +1,6 @@
 #!/bin/sh
-# Deploy hearth-frame with the real token injected (token lives in untracked .token)
+# Deploy hearth-frame (no secrets in the page; weather comes from weather.json)
 set -e
 cd "$(dirname "$0")"
-sed "s|__HA_TOKEN__|$(cat .token)|" dist/hearth-frame.html | ssh root@ha.home "cat > /config/www/hearth-frame.html"
+scp dist/hearth-frame.html root@ha.home:/config/www/
 echo deployed
