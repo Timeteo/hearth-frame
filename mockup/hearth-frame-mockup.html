@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>hearth-frame mockup</title>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  html,body { margin:0; padding:0; background:#000; height:100%; overflow:hidden;
+    font-family:Roboto,sans-serif; -webkit-font-smoothing:antialiased; }
+  /* fixed 1280x800 stage, scaled to fit the browser window */
+  #stage { position:absolute; width:1280px; height:800px; top:50%; left:50%;
+    transform-origin:center; background:#0a0b0e; overflow:hidden; }
+
+  .slide { position:absolute; inset:0; opacity:0; transition:opacity 1.4s ease; }
+  .slide.on { opacity:1; }
+  .slide img { position:absolute; top:0; height:100%; object-fit:cover; }
+  .slide.full img { left:0; width:100%; }
+  .slide.pair img.l { left:0; width:calc(50% - 1px); }
+  .slide.pair img.r { left:calc(50% + 1px); width:calc(50% - 1px); }
+
+  /* scrims for overlay legibility */
+  .scrim-b { position:absolute; left:0; right:0; bottom:0; height:220px; pointer-events:none;
+    background:linear-gradient(180deg, rgba(10,11,14,0) 0%, rgba(10,11,14,.55) 70%, rgba(10,11,14,.72) 100%); }
+  .scrim-t { position:absolute; left:0; right:0; top:0; height:110px; pointer-events:none;
+    background:linear-gradient(0deg, rgba(10,11,14,0) 0%, rgba(10,11,14,.45) 100%); }
+
+  /* clock + weather, bottom-left */
+  #clock { position:absolute; left:48px; bottom:40px; color:rgba(255,255,255,.97);
+    text-shadow:0 1px 12px rgba(0,0,0,.45); }
+  #clock .t { font-size:88px; font-weight:300; line-height:1; letter-spacing:-1px; }
+  #clock .t .ap { font-size:26px; font-weight:500; color:#FFB27A; margin-left:8px;
+    letter-spacing:.06em; }
+  #clock .w { margin-top:10px; font-size:21px; font-weight:400; color:rgba(255,255,255,.85); }
+  #clock .w .deg { font-weight:500; }
+  #clock .w .dot { color:#FFB27A; margin:0 8px; }
+  #clock .w .hl { color:rgba(255,255,255,.55); }
+
+  /* photo metadata, bottom-right */
+  #meta { position:absolute; right:48px; bottom:46px; text-align:right;
+    color:rgba(255,255,255,.85); text-shadow:0 1px 10px rgba(0,0,0,.5); }
+  #meta .loc { font-size:20px; font-weight:400; }
+  #meta .date { margin-top:6px; font-size:15px; font-weight:400; letter-spacing:.05em;
+    color:rgba(255,255,255,.55); }
+  #meta .loc .pin { color:#FFB27A; margin-right:6px; font-size:17px; }
+
+  /* per-photo meta for split view: one block per half, bottom-right of its half */
+  .halfmeta { position:absolute; bottom:46px; text-align:right; z-index:2;
+    color:rgba(255,255,255,.85); text-shadow:0 1px 10px rgba(0,0,0,.5); }
+  .halfmeta.l { right:calc(50% + 25px); }
+  .halfmeta.r { right:48px; }
+  .halfmeta .loc { font-size:18px; font-weight:400; }
+  .halfmeta .loc .pin { color:#FFB27A; margin-right:6px; font-size:15px; }
+  .halfmeta .date { margin-top:5px; font-size:14px; font-weight:400; letter-spacing:.05em;
+    color:rgba(255,255,255,.55); }
+  /* demo controls */
+  #hint { position:absolute; top:14px; right:16px; font-size:12px; color:rgba(255,255,255,.35);
+    letter-spacing:.05em; z-index:9; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="slides"></div>
+  <div class="scrim-t"></div>
+  <div class="scrim-b"></div>
+  <div id="clock">
+    <div class="t"><span id="tt">8:42</span><span class="ap" id="ap">AM</span></div>
+    <div class="w"><span class="deg">68°</span> Sunny<span class="dot">·</span><span class="hl">H 84° · L 62°</span></div>
+  </div>
+  <div id="meta">
+    <div class="loc"><span class="pin">◆</span><span id="mloc">Carlsbad, California</span></div>
+    <div class="date" id="mdate">JUNE 14, 2025</div>
+  </div>
+  <div class="halfmeta l" id="hmL"></div>
+  <div class="halfmeta r" id="hmR"></div>
+  <div id="hint">click / space = next</div>
+</div>
+<script>
+  /* ---- fit 1280x800 stage to window ---- */
+  function fit(){
+    const s = Math.min(innerWidth/1280, innerHeight/800);
+    document.getElementById('stage').style.transform =
+      `translate(-50%,-50%) scale(${s})`;
+  }
+  addEventListener('resize', fit); fit();
+
+  /* ---- live clock ---- */
+  function tick(){
+    const d = new Date();
+    let h = d.getHours(); const ap = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    document.getElementById('tt').textContent = h + ':' + String(d.getMinutes()).padStart(2,'0');
+    document.getElementById('ap').textContent = ap;
+  }
+  setInterval(tick, 5000); tick();
+
+  /* ---- demo slides ---- */
+  const P = (seed,w,h) => `https://picsum.photos/seed/${seed}/${w}/${h}`;
+  const slides = [
+    { kind:'full', src:[P('coast',1600,1000)],
+      meta:[{loc:'Carlsbad, California', date:'JUNE 14, 2025'}] },
+    { kind:'pair', src:[P('kid1',700,1100), P('kid2',700,1100)],
+      meta:[{loc:'Temecula, California', date:'MAY 3, 2025'},
+            {loc:'Temecula, California', date:'MAY 3, 2025'}] },
+    { kind:'full', src:[P('yosemite',1600,1000)],
+      meta:[{loc:'Yosemite National Park', date:'AUGUST 9, 2024'}] },
+    { kind:'pair', src:[P('bday',700,1100), P('beach2',700,1100)],
+      meta:[{loc:'San Diego, California', date:'JULY 4, 2024'},
+            {loc:'Oceanside Pier', date:'JULY 4, 2024'}] },
+    { kind:'full', src:[P('family',1600,1000)],
+      meta:[{loc:null, date:'FEBRUARY 22, 2025'}] },
+  ];
+
+  const wrap = document.getElementById('slides');
+  slides.forEach((s,i) => {
+    const d = document.createElement('div');
+    d.className = 'slide ' + s.kind;
+    d.innerHTML = s.kind === 'full'
+      ? `<img src="${s.src[0]}">`
+      : `<img class="l" src="${s.src[0]}"><img class="r" src="${s.src[1]}">`;
+    wrap.appendChild(d);
+  });
+
+  let cur = 0;
+  const metaHtml = m => `
+    ${m.loc ? `<div class="loc"><span class="pin">◆</span>${m.loc}</div>` : ''}
+    <div class="date">${m.date || ''}</div>`;
+  function show(i){
+    document.querySelectorAll('.slide').forEach((el,j) =>
+      el.classList.toggle('on', j === i));
+    const s = slides[i], gm = document.getElementById('meta'),
+      hL = document.getElementById('hmL'), hR = document.getElementById('hmR');
+    if (s.kind === 'full') {
+      const m = s.meta[0];
+      const locEl = document.getElementById('mloc');
+      const pin = document.querySelector('#meta .pin');
+      if (m.loc) { locEl.textContent = m.loc; pin.style.display = 'inline'; }
+      else { locEl.textContent = ''; pin.style.display = 'none'; }
+      document.getElementById('mdate').textContent = m.date || '';
+      gm.style.display = 'block'; hL.style.display = hR.style.display = 'none';
+    } else {
+      gm.style.display = 'none';
+      hL.innerHTML = metaHtml(s.meta[0]); hL.style.display = 'block';
+      hR.innerHTML = metaHtml(s.meta[1]); hR.style.display = 'block';
+    }
+  }
+  function next(){ cur = (cur + 1) % slides.length; show(cur); }
+  show(0);
+  let timer = setInterval(next, 8000);
+  function manual(){ clearInterval(timer); next(); timer = setInterval(next, 8000); }
+  addEventListener('click', manual);
+  addEventListener('keydown', e => { if (e.code === 'Space') manual(); });
+</script>
+</body>
+</html>
