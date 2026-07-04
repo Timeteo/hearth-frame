@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hearth-frame</title>
+<style>
+  html,body { margin:0; padding:0; width:100%; height:100%; overflow:hidden;
+    background:#0a0b0e; font-family:Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; cursor:none; }
+
+  .slide { position:absolute; inset:0; opacity:0; transition:opacity 1.4s ease; }
+  .slide.on { opacity:1; }
+  .slide img { position:absolute; top:0; height:100%; object-fit:cover; background:#0a0b0e; }
+  .slide.full img { left:0; width:100%; }
+  .slide.pair img.l { left:0; width:calc(50% - 1px); }
+  .slide.pair img.r { left:calc(50% + 1px); width:calc(50% - 1px); }
+  /* lone portrait fallback: centered, dark gutters */
+  .slide.solo img { left:50%; transform:translateX(-50%); width:auto; max-width:100%; }
+
+  .scrim-b { position:absolute; left:0; right:0; bottom:0; height:28vh; pointer-events:none;
+    background:linear-gradient(180deg, rgba(10,11,14,0) 0%, rgba(10,11,14,.55) 70%, rgba(10,11,14,.72) 100%); }
+  .scrim-t { position:absolute; left:0; right:0; top:0; height:14vh; pointer-events:none;
+    background:linear-gradient(0deg, rgba(10,11,14,0) 0%, rgba(10,11,14,.45) 100%); }
+
+  #clock { position:absolute; left:48px; bottom:40px; color:rgba(255,255,255,.97);
+    text-shadow:0 1px 12px rgba(0,0,0,.45); }
+  #clock .t { font-size:88px; font-weight:300; line-height:1; letter-spacing:-1px; }
+  #clock .t .ap { font-size:26px; font-weight:500; color:#FFB27A; margin-left:8px; letter-spacing:.06em; }
+  #clock .w { margin-top:10px; font-size:21px; font-weight:400; color:rgba(255,255,255,.85); min-height:25px; }
+  #clock .w .deg { font-weight:500; }
+  #clock .w .dot { color:#FFB27A; margin:0 8px; }
+  #clock .w .hl { color:rgba(255,255,255,.55); }
+
+  .meta { position:absolute; bottom:46px; text-align:right; color:rgba(255,255,255,.85);
+    text-shadow:0 1px 10px rgba(0,0,0,.5); display:none; }
+  .meta .loc { font-size:20px; font-weight:400; }
+  .meta .loc .pin { color:#FFB27A; margin-right:6px; font-size:17px; }
+  .meta .date { margin-top:6px; font-size:15px; font-weight:400; letter-spacing:.05em;
+    color:rgba(255,255,255,.55); }
+  #metaR { right:48px; }
+  #metaL { right:calc(50% + 25px); }
+  #metaL .loc, #metaL .date { font-size:18px; }
+  #metaL .date { font-size:14px; }
+  .meta.pairhalf .loc { font-size:18px; }
+  .meta.pairhalf .date { font-size:14px; }
+</style>
+</head>
+<body>
+  <div id="sA" class="slide"></div>
+  <div id="sB" class="slide"></div>
+  <div class="scrim-t"></div>
+  <div class="scrim-b"></div>
+  <div id="clock">
+    <div class="t"><span id="tt"></span><span class="ap" id="ap"></span></div>
+    <div class="w" id="wline"></div>
+  </div>
+  <div class="meta" id="metaL"></div>
+  <div class="meta" id="metaR"></div>
+
+<script>
+(() => {
+  const CFG = {
+    manifest: "/local/frame/manifest.json",
+    // Long-lived token for the weather overlay. If empty, tries the HA
+    // frontend's own token from localStorage (same-origin with the hub).
+    token: "__HA_TOKEN__",  // injected at deploy time; never commit a real token
+    weather_entity: "weather.home_weather",
+    dwell_ms: 10000,
+    fade_ms: 1400,
+    weather_refresh_ms: 15 * 60 * 1000,
+    manifest_refresh_ms: 6 * 60 * 60 * 1000,
+  };
+
+  const $ = id => document.getElementById(id);
+
+  /* ---------- clock ---------- */
+  function tick() {
+    const d = new Date();
+    let h = d.getHours(); const ap = h >= 12 ? "PM" : "AM";
+    $("tt").textContent = (h % 12 || 12) + ":" + String(d.getMinutes()).padStart(2, "0");
+    $("ap").textContent = ap;
+  }
+  setInterval(tick, 1000); tick();
+
+  /* ---------- weather ---------- */
+  const COND = {
+    "clear-night": "Clear", cloudy: "Cloudy", fog: "Fog", hail: "Hail",
+    lightning: "Storm", "lightning-rainy": "Thunderstorms", partlycloudy: "Partly Cloudy",
+    pouring: "Pouring", rainy: "Rain", snowy: "Snow", "snowy-rainy": "Wintry Mix",
+    sunny: "Sunny", windy: "Windy", "windy-variant": "Windy", exceptional: "Alert",
+  };
+  function authToken() {
+    if (CFG.token) return CFG.token;
+    try { return JSON.parse(localStorage.getItem("hassTokens")).access_token; }
+    catch (e) { return null; }
+  }
+  function api(path, opts) {
+    const t = authToken();
+    if (!t) return Promise.reject(new Error("no token"));
+    return fetch(path, Object.assign({}, opts, {
+      headers: Object.assign({ Authorization: "Bearer " + t, "Content-Type": "application/json" },
+        (opts || {}).headers),
+    })).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); });
+  }
+  function refreshWeather() {
+    const el = $("wline");
+    Promise.all([
+      api("/api/states/" + CFG.weather_entity),
+      api("/api/services/weather/get_forecasts?return_response", {
+        method: "POST",
+        body: JSON.stringify({ entity_id: CFG.weather_entity, type: "daily" }),
+      }).catch(() => null),
+    ]).then(([st, fc]) => {
+      const t = Math.round(st.attributes.temperature);
+      const cond = COND[st.state] || st.state;
+      let hl = "";
+      try {
+        const day = (fc.service_response || fc)[CFG.weather_entity].forecast[0];
+        hl = `<span class="dot">·</span><span class="hl">H ${Math.round(day.temperature)}° · L ${Math.round(day.templow)}°</span>`;
+      } catch (e) { /* forecast optional */ }
+      el.innerHTML = `<span class="deg">${t}°</span> ${cond}${hl}`;
+    }).catch(() => { el.innerHTML = ""; });
+  }
+  setInterval(refreshWeather, CFG.weather_refresh_ms); refreshWeather();
+
+  /* ---------- photo deck ---------- */
+  let deck = [];        // shuffled photo entries not yet shown
+  let all = [];         // full manifest
+  const esc = s => String(s).replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function shuffle(a) {
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+  function loadManifest() {
+    return fetch(CFG.manifest + "?t=" + Date.now())
+      .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(m => { all = m.photos || m; })
+      .catch(() => {});
+  }
+  setInterval(loadManifest, CFG.manifest_refresh_ms);
+
+  const isPortrait = p => (p.h || 0) > (p.w || 0);
+  function draw() {                    // next 1-2 photos forming one slide
+    if (!deck.length) deck = shuffle(all.slice());
+    if (!deck.length) return null;
+    const first = deck.shift();
+    if (!isPortrait(first)) return { kind: "full", ph: [first] };
+    const j = deck.findIndex(isPortrait);
+    if (j >= 0) return { kind: "pair", ph: [first, deck.splice(j, 1)[0]] };
+    return { kind: "solo", ph: [first] };
+  }
+
+  const MON = ["JANUARY","FEBRUARY","MARCH","APRIL","MAY","JUNE","JULY",
+    "AUGUST","SEPTEMBER","OCTOBER","NOVEMBER","DECEMBER"];
+  function fmtDate(iso) {
+    // date-only strings must not go through Date() — it parses them as UTC
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+    if (!m) return "";
+    return `${MON[+m[2] - 1]} ${+m[3]}, ${m[1]}`;
+  }
+  function metaHtml(p) {
+    const loc = p.loc ? `<div class="loc"><span class="pin">◆</span>${esc(p.loc)}</div>` : "";
+    const date = fmtDate(p.d);
+    return loc || date ? `${loc}<div class="date">${date}</div>` : "";
+  }
+  const src = p => p.f.match(/^https?:/) ? p.f : "/local/frame/" + p.f;
+
+  function preload(urls) {
+    return Promise.all(urls.map(u => new Promise(res => {
+      const im = new Image();
+      im.onload = () => res(true); im.onerror = () => res(false);
+      im.src = u;
+    })));
+  }
+
+  let front = $("sA"), back = $("sB");
+  function advance() {
+    const s = draw();
+    if (!s) { setTimeout(advance, 30000); loadManifest(); return; }
+    const urls = s.ph.map(src);
+    preload(urls).then(ok => {
+      if (ok.some(x => !x)) { advance(); return; }   // skip broken files
+      back.className = "slide " + s.kind;
+      back.innerHTML = s.kind === "pair"
+        ? `<img class="l" src="${esc(urls[0])}"><img class="r" src="${esc(urls[1])}">`
+        : `<img src="${esc(urls[0])}">`;
+      back.classList.add("on"); front.classList.remove("on");
+      [front, back] = [back, front];
+      const mL = $("metaL"), mR = $("metaR");
+      if (s.kind === "pair") {
+        mL.innerHTML = metaHtml(s.ph[0]); mL.className = "meta pairhalf";
+        mR.innerHTML = metaHtml(s.ph[1]); mR.className = "meta pairhalf";
+        mL.style.display = mL.innerHTML ? "block" : "none";
+        mR.style.display = mR.innerHTML ? "block" : "none";
+      } else {
+        mL.style.display = "none";
+        mR.innerHTML = metaHtml(s.ph[0]); mR.className = "meta";
+        mR.style.display = mR.innerHTML ? "block" : "none";
+      }
+      setTimeout(advance, CFG.dwell_ms);
+    });
+  }
+  loadManifest().then(advance);
+})();
+</script>
+</body>
+</html>
