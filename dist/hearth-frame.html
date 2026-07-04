@@ -61,10 +61,11 @@
 <script>
 (() => {
   const CFG = {
-    manifest: "/local/frame/manifest.json",
-    // Published by the "Portal Frame - Publish Weather" HA automation.
+    manifest: "frame/manifest.json",
+    // Published by the "Portal Frame - Publish Weather" HA automation;
+    // the frame server proxies it same-origin at frame/weather.json.
     // No tokens: only non-sensitive weather data is fetched.
-    weather_json: "/local/frame/weather.json",
+    weather_json: "frame/weather.json",
     dwell_ms: 10000,
     fade_ms: 1400,
     weather_refresh_ms: 15 * 60 * 1000,
@@ -149,7 +150,7 @@
     const date = fmtDate(p.d);
     return loc || date ? `${loc}<div class="date">${date}</div>` : "";
   }
-  const src = p => p.f.match(/^https?:/) ? p.f : "/local/frame/" + p.f;
+  const src = p => p.f.match(/^https?:/) ? p.f : "frame/" + p.f;
 
   function preload(urls) {
     return Promise.all(urls.map(u => new Promise(res => {
