@@ -38,6 +38,7 @@
   .meta .loc .pin { color:#FFB27A; margin-right:6px; font-size:17px; }
   .meta .date { margin-top:6px; font-size:15px; font-weight:400; letter-spacing:.05em;
     color:rgba(255,255,255,.55); }
+  .meta .date .ago { color:#FFB27A; }
   #metaR { right:48px; }
   #metaL { right:calc(50% + 25px); }
   #metaL .loc, #metaL .date { font-size:18px; }
@@ -70,7 +71,23 @@
     fade_ms: 1400,
     weather_refresh_ms: 15 * 60 * 1000,
     manifest_refresh_ms: 6 * 60 * 60 * 1000,
+    // Anniversary mix: photos taken within ±window days of today's calendar
+    // date (any year) get anniv_share of slots. Share scales down linearly
+    // when the pool is smaller than anniv_min_pool so a thin window doesn't
+    // repeat the same few photos all evening.
+    anniv_share: 0.3,
+    anniv_window_days: 14,
+    anniv_min_pool: 12,
+    anniv_per_date_cap: 6,     // max photos per exact capture date per cycle
   };
+  // URL overrides, e.g. ?anniv=30&window=14&dwell=10 (regex, not
+  // URLSearchParams — the Portal WebView is old)
+  {
+    const q = k => (location.search.match(new RegExp("[?&]" + k + "=(\\d+)")) || [])[1];
+    if (q("anniv") != null) CFG.anniv_share = +q("anniv") / 100;
+    if (q("window")) CFG.anniv_window_days = +q("window");
+    if (q("dwell")) CFG.dwell_ms = +q("dwell") * 1000;
+  }
 
   const $ = id => document.getElementById(id);
 
@@ -107,6 +124,8 @@
 
   /* ---------- photo deck ---------- */
   let deck = [];        // shuffled photo entries not yet shown
+  let annivDeck = [];   // shuffled "taken around this date, past years" entries
+  let annivDay = "";    // date the anniversary pool was built for
   let all = [];         // full manifest
   const esc = s => String(s).replace(/[&<>"']/g,
     c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -121,19 +140,75 @@
   function loadManifest() {
     return fetch(CFG.manifest + "?t=" + Date.now())
       .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then(m => { all = m.photos || m; })
+      .then(m => { all = m.photos || m; annivDay = ""; })  // force anniv-pool rebuild
       .catch(() => {});
   }
   setInterval(loadManifest, CFG.manifest_refresh_ms);
 
   const isPortrait = p => (p.h || 0) > (p.w || 0);
+
+  /* ---------- anniversary pool ---------- */
+  // date-only strings must not go through Date() — it parses them as UTC
+  const parseD = iso => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || ""); return m && { y: +m[1], mo: +m[2], da: +m[3] }; };
+  function annivDelta(p, now) {        // min |days| between photo's calendar date and today, wrapping year-end
+    const d = parseD(p.d);
+    if (!d) return null;
+    let best = Infinity;
+    for (let y = now.getFullYear() - 1; y <= now.getFullYear() + 1; y++)
+      best = Math.min(best, Math.abs((new Date(y, d.mo - 1, d.da) - now) / 86400000));
+    return best;
+  }
+  function yearsAgo(p, now) {
+    const d = parseD(p.d);
+    if (!d) return 0;
+    // nearest anniversary's year decides the count (Dec photos shown in early Jan count the extra year)
+    return Math.round((now - new Date(d.y, d.mo - 1, d.da)) / (365.25 * 86400000));
+  }
+  function buildAnnivPool() {
+    const now = new Date(); now.setHours(0, 0, 0, 0);
+    annivDay = now.toDateString();
+    const byDate = {};
+    for (const p of all) {
+      const dt = annivDelta(p, now);
+      if (dt == null || dt > CFG.anniv_window_days) continue;
+      if (yearsAgo(p, now) < 1) continue;          // this year's photos aren't anniversaries
+      (byDate[p.d] = byDate[p.d] || []).push(p);
+    }
+    const pool = [];
+    for (const k in byDate) {                       // clump control: cap per capture date
+      const g = shuffle(byDate[k]);
+      pool.push(...g.slice(0, CFG.anniv_per_date_cap));
+    }
+    annivDeck = shuffle(pool);
+    annivPoolSize = pool.length;
+    return pool.length;
+  }
+  let annivPoolSize = 0;
+  function annivShareNow() {                        // rebuilds pool on day change / manifest refresh
+    if (new Date().toDateString() !== annivDay) buildAnnivPool();
+    if (!annivPoolSize) return 0;                   // nothing near this date — pure uniform mode
+    if (!annivDeck.length) buildAnnivPool();        // cycled through: reshuffle for the rest of the day
+    return CFG.anniv_share * Math.min(1, annivDeck.length / CFG.anniv_min_pool);
+  }
+  function takeAnniv(wantPortrait) {                // draw from anniv deck, keep main deck consistent
+    const i = wantPortrait == null ? 0 : annivDeck.findIndex(p => isPortrait(p) === wantPortrait);
+    if (i < 0) return null;
+    const p = annivDeck.splice(i, 1)[0];
+    const j = deck.indexOf(p);
+    if (j >= 0) deck.splice(j, 1);
+    return p;
+  }
+
   function draw() {                    // next 1-2 photos forming one slide
     if (!deck.length) deck = shuffle(all.slice());
     if (!deck.length) return null;
-    const first = deck.shift();
+    const fromAnniv = Math.random() < annivShareNow();
+    const first = fromAnniv ? (takeAnniv(null) || deck.shift()) : deck.shift();
     if (!isPortrait(first)) return { kind: "full", ph: [first] };
-    const j = deck.findIndex(isPortrait);
-    if (j >= 0) return { kind: "pair", ph: [first, deck.splice(j, 1)[0]] };
+    // portrait partner: themed pair from the anniv deck when leading with one
+    const partner = (fromAnniv && takeAnniv(true)) ||
+      (j => j >= 0 ? deck.splice(j, 1)[0] : null)(deck.findIndex(isPortrait));
+    if (partner) return { kind: "pair", ph: [first, partner] };
     return { kind: "solo", ph: [first] };
   }
 
@@ -147,7 +222,13 @@
   }
   function metaHtml(p) {
     const loc = p.loc ? `<div class="loc"><span class="pin">◆</span>${esc(p.loc)}</div>` : "";
-    const date = fmtDate(p.d);
+    let date = fmtDate(p.d);
+    if (date) {
+      const now = new Date(); now.setHours(0, 0, 0, 0);
+      const dt = annivDelta(p, now), yrs = yearsAgo(p, now);
+      if (dt != null && dt <= CFG.anniv_window_days && yrs >= 1)
+        date += ` <span class="ago">· ${yrs} ${yrs === 1 ? "YEAR" : "YEARS"} AGO</span>`;
+    }
     return loc || date ? `${loc}<div class="date">${date}</div>` : "";
   }
   const src = p => p.f.match(/^https?:/) ? p.f : "frame/" + p.f;
