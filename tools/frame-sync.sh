@@ -27,15 +27,20 @@ if ! rclone lsd "$REMOTE" >/dev/null 2>&1; then
     echo "no $REMOTE folder in Drive yet (first Takeout export not delivered) — nothing to do"
     exit 0
 fi
-rclone copy "$REMOTE" "$RAW/zips" --include '*.zip' --include '*.tgz' -v
+# --ignore-existing: extracted zips are truncated to 0 bytes below to free
+# disk (export can exceed the LXC disk); without this rclone would re-pull them
+rclone copy "$REMOTE" "$RAW/zips" --include '*.zip' --include '*.tgz' --ignore-existing -v
 
-# 2. Extract any archives not yet extracted
+# 2. Extract archives one at a time, dropping videos (never displayed) and
+#    truncating each zip afterwards so peak disk stays ~one-zip-sized
 for z in "$RAW"/zips/*.zip; do
     [ -e "$z" ] || continue
     marker="$RAW/.done-$(basename "$z")"
     [ -e "$marker" ] && continue
     echo "extracting $(basename "$z")"
-    unzip -qo "$z" -d "$RAW/extracted" && touch "$marker"
+    unzip -qo "$z" -d "$RAW/extracted" \
+        -x '*.mp4' '*.MP4' '*.mov' '*.MOV' '*.m4v' '*.avi' '*.gif' '*.mkv' '*.webm' \
+        && { touch "$marker"; : > "$z"; }
 done
 
 # 3. Convert: HEIC->JPEG + downscale; JPEG->downscale. Junk filtering
@@ -48,7 +53,7 @@ find "$RAW/extracted" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.
     [ -e "$out" ] && continue
     if [[ "${src,,}" == *.heic ]]; then
         heif-convert -q "$QUALITY" "$src" "$out.tmp.jpg" >/dev/null 2>&1 || { echo "heif fail: $src"; continue; }
-        mogrify -resize "${MAX_EDGE}x${MAX_EDGE}>" "$out.tmp.jpg" && mv "$out.tmp.jpg" "$out"
+        { mogrify -resize "${MAX_EDGE}x${MAX_EDGE}>" "$out.tmp.jpg" && mv "$out.tmp.jpg" "$out"; } || { echo "resize fail: $src"; rm -f "$out.tmp.jpg"; continue; }
     else
         convert "$src" -auto-orient -resize "${MAX_EDGE}x${MAX_EDGE}>" -quality "$QUALITY" "$out" || { echo "convert fail: $src"; continue; }
     fi
@@ -56,6 +61,7 @@ find "$RAW/extracted" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.
     for sc in "$src.json" "$src.supplemental-metadata.json"; do
         [ -e "$sc" ] && cp -n "$sc" "$PHOTOS/$(basename "$out").json"
     done
+    rm -f "$src"        # converted copy is canonical now; free the space
 done
 
 # 4. Rebuild manifest (scan frame/ so f paths come out as photos/<name>.jpg,
