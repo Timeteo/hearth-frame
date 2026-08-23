@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>hearth-frame curate</title>
+<style>
+  *,*::before,*::after { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:#0a0b0e; color:#eee;
+    font-family:Roboto,-apple-system,sans-serif; -webkit-font-smoothing:antialiased; }
+  #header { position:sticky; top:0; z-index:10; display:flex; align-items:center; gap:12px;
+    padding:10px 12px; background:#111319; border-bottom:1px solid #222834;
+    font-size:14px; color:rgba(255,255,255,.7); flex-wrap:wrap; }
+  #header .title { font-weight:600; color:#eee; margin-right:auto; font-size:16px; }
+  #header .counts { display:flex; gap:16px; }
+  #header .counts span { white-space:nowrap; }
+  #header .counts .n { color:#FFB27A; font-weight:600; }
+  #header button { padding:8px 20px; border:0; border-radius:10px; font-size:14px; font-weight:600;
+    color:#fff; cursor:pointer; }
+  #blockBtn { background:#8c2f39; }
+  #blockBtn:disabled { opacity:.35; cursor:default; }
+  #skipBtn { background:#2a2e3a; }
+  #rotBtn { background:#27436b; }
+  #rotBtn:disabled { opacity:.35; cursor:default; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr));
+    gap:6px; padding:8px; }
+  #grid .cell { position:relative; aspect-ratio:auto; cursor:pointer; border-radius:6px;
+    overflow:hidden; background:#1a1c24; border:2px solid transparent; transition:border-color .15s; }
+  #grid .cell.sel { border-color:#8c2f39; }
+  #grid .cell img { display:block; width:100%; height:auto; }
+  #grid .cell .overlay { position:absolute; inset:0; display:flex; align-items:center;
+    justify-content:center; background:rgba(140,47,57,.7); opacity:0;
+    transition:opacity .15s; font-size:32px; font-weight:700; color:#fff; }
+  #grid .cell.sel .overlay { opacity:1; }
+  #grid .cell .date { position:absolute; bottom:0; left:0; right:0;
+    padding:4px 6px; font-size:11px; color:rgba(255,255,255,.7);
+    background:linear-gradient(0deg,rgba(0,0,0,.7),transparent);
+    pointer-events:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #end { text-align:center; padding:40px 16px; color:rgba(255,255,255,.4); font-size:15px; }
+  #loading { text-align:center; padding:60px 16px; color:rgba(255,255,255,.4); font-size:15px; }
+  @media (max-width:600px) {
+    #grid { grid-template-columns:repeat(3,1fr); gap:4px; padding:4px; }
+  }
+</style>
+</head>
+<body>
+  <div id="header">
+    <span class="title">✕ Curate</span>
+    <div class="counts">
+      <span>blocked <span class="n" id="blockedCount">0</span></span>
+      <span>skipped <span class="n" id="seenCount">0</span></span>
+      <span id="leftLabel">left <span class="n" id="leftCount">0</span></span>
+    </div>
+    <button id="rotBtn" disabled>⟳ Rotate</button>
+    <button id="blockBtn">Block 0</button>
+    <button id="skipBtn">Skip page</button>
+  </div>
+  <div id="grid"></div>
+  <div id="end"></div>
+<script>
+(() => {
+  const PHOTO_PREFIX = "frame/";
+  const PAGE = 48;
+  const $ = id => document.getElementById(id);
+
+  let allPhotos = [];
+  let idx = 0;
+  let blocked = 0;
+  let skipped = 0;
+  let pending = new Map();  // f -> entry
+
+  function renderPage() {
+    const grid = $("grid");
+    const end = $("end");
+    grid.innerHTML = "";
+    end.textContent = "";
+
+    const page = allPhotos.slice(idx, idx + PAGE);
+    if (!page.length && idx === 0) {
+      end.textContent = "manifest empty — nothing to curate";
+      return;
+    }
+    if (!page.length) {
+      end.textContent = "🎉 all done — every photo reviewed";
+      return;
+    }
+
+    for (const entry of page) {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      cell.dataset.f = entry.f;
+
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.src = PHOTO_PREFIX + entry.f;
+      img.alt = "";
+
+      const overlay = document.createElement("div");
+      overlay.className = "overlay";
+      overlay.textContent = "✕";
+
+      const date = document.createElement("div");
+      date.className = "date";
+      date.textContent = [entry.loc, entry.d].filter(Boolean).join(" · ") || entry.f;
+
+      cell.append(img, overlay, date);
+      cell.addEventListener("click", () => toggleCell(cell, entry));
+      grid.appendChild(cell);
+    }
+
+    updateUI();
+  }
+
+  function toggleCell(cell, entry) {
+    cell.classList.toggle("sel");
+    const f = entry.f;
+    if (pending.has(f)) pending.delete(f);
+    else pending.set(f, entry);
+    updateUI();
+  }
+
+  function toast(msg) {
+    const el = document.createElement("div");
+    Object.assign(el.style, {
+      position:"fixed", top:"56px", left:"50%", transform:"translateX(-50%)",
+      background:"#222834", padding:"8px 18px", borderRadius:"20px",
+      fontSize:"14px", zIndex:99, transition:"opacity .3s"
+    });
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 300); }, 1800);
+  }
+
+  function updateUI() {
+    $("blockedCount").textContent = blocked;
+    $("seenCount").textContent = skipped + blocked;
+    const remaining = allPhotos.length - idx - PAGE + pending.size;
+    $("leftCount").textContent = Math.max(0, allPhotos.length - idx - PAGE);
+    const n = pending.size;
+    const btn = $("blockBtn");
+    btn.textContent = `Block ${n}`;
+    btn.disabled = n === 0;
+    $("rotBtn").disabled = n === 0;
+  }
+
+  $("rotBtn").onclick = () => {
+    if (!pending.size) return;
+    const entries = [...pending.entries()];
+    const btn = $("rotBtn"); btn.disabled = true;
+    let ok = 0, fail = 0;
+    Promise.allSettled(entries.map(([f, entry]) => {
+      const rot = (entry._rot || 0) + 270;
+      return fetch("frame/block", { method:"POST", body:JSON.stringify({ f, rotate:270 }) })
+        .then(r => { if (!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+        .then(() => {
+          entry._rot = rot;
+          if (rot % 180 === 90) { const t = entry.w; entry.w = entry.h; entry.h = t; }
+          const img = document.querySelector(`.cell[data-f="${CSS.escape(f)}"] img`);
+          if (img) img.src = PHOTO_PREFIX + f + "?r=" + Date.now();
+          ok++;
+        })
+        .catch(() => { fail++; });
+    })).then(() => {
+      pending.clear();
+      const msg = fail ? `rotated ${ok} (${fail} failed)` : `rotated ${ok}`;
+      toast(msg);
+      updateUI();
+      btn.disabled = false;
+    });
+  };
+
+  $("skipBtn").onclick = () => {
+    pending.clear();
+    idx += PAGE;
+    skipped += Math.min(PAGE, allPhotos.length - idx);
+    renderPage();
+  };
+
+  $("blockBtn").onclick = async () => {
+    const entries = [...pending.values()];
+    if (!entries.length) return;
+    const btn = $("blockBtn");
+    btn.disabled = true;
+    btn.textContent = "blocking...";
+
+    const results = await Promise.allSettled(entries.map(entry =>
+      fetch("frame/block", {
+        method: "POST",
+        body: JSON.stringify({ f: entry.f })
+      }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    ));
+
+    let ok = 0, fail = 0;
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].status === "fulfilled") ok++;
+      else fail++;
+    }
+
+    blocked += ok;
+    skipped += results.length - ok;
+    const pageSize = Math.min(PAGE, allPhotos.length - idx);
+    skipped += pageSize - entries.length - fail;
+    pending.clear();
+    idx += PAGE;
+    renderPage();
+
+    toast(fail ? `blocked ${ok} (${fail} failed — reload to retry)` : `blocked ${ok}`);
+  };
+
+  fetch("frame/manifest.json?t=" + Date.now())
+    .then(r => r.json())
+    .then(m => {
+      const src = m.photos || m;
+      allPhotos = [];
+      const seen = new Set();
+      for (const p of src) {
+        if (!seen.has(p.f)) { seen.add(p.f); allPhotos.push(p); }
+      }
+      // shuffle
+      for (let i = allPhotos.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [allPhotos[i], allPhotos[j]] = [allPhotos[j], allPhotos[i]];
+      }
+      renderPage();
+    });
+})();
+</script>
+</body>
+</html>
