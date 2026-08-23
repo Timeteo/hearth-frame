@@ -71,7 +71,12 @@
     fade_ms: 1400,
     weather_refresh_ms: 15 * 60 * 1000,
     manifest_refresh_ms: 30 * 60 * 1000,
-    // Anniversary mix: photos taken within ±window days of today's calendar
+    // Recent + anniversary mix. Immich manifests label bounded cache pools;
+    // legacy manifests without labels still use date-derived pools.
+    recent_share: 0.25,
+    recent_days: 90,
+    recent_min_pool: 50,
+    // Anniversary photos taken within ±window days of today's calendar
     // date (any year) get anniv_share of slots. Share scales down linearly
     // when the pool is smaller than anniv_min_pool so a thin window doesn't
     // repeat the same few photos all evening.
@@ -80,10 +85,12 @@
     anniv_min_pool: 12,
     anniv_per_date_cap: 6,     // max photos per exact capture date per cycle
   };
-  // URL overrides, e.g. ?anniv=30&window=14&dwell=10 (regex, not
+  // URL overrides, e.g. ?recent=25&recentDays=90&anniv=30&window=14&dwell=10 (regex, not
   // URLSearchParams — the Portal WebView is old)
   {
     const q = k => (location.search.match(new RegExp("[?&]" + k + "=(\\d+)")) || [])[1];
+    if (q("recent") != null) CFG.recent_share = +q("recent") / 100;
+    if (q("recentDays")) CFG.recent_days = +q("recentDays");
     if (q("anniv") != null) CFG.anniv_share = +q("anniv") / 100;
     if (q("window")) CFG.anniv_window_days = +q("window");
     if (q("dwell")) CFG.dwell_ms = +q("dwell") * 1000;
@@ -124,6 +131,7 @@
 
   /* ---------- photo deck ---------- */
   let deck = [];        // shuffled photo entries not yet shown
+  let recentDeck = [];  // shuffled recently captured entries
   let annivDeck = [];   // shuffled "taken around this date, past years" entries
   let annivDay = "";    // date the anniversary pool was built for
   let all = [];         // full manifest
@@ -140,7 +148,7 @@
   function loadManifest() {
     return fetch(CFG.manifest + "?t=" + Date.now())
       .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then(m => { all = m.photos || m; annivDay = ""; })  // force anniv-pool rebuild
+      .then(m => { all = m.photos || m; deck = []; recentDeck = []; annivDay = ""; })
       .catch(() => {});
   }
   setInterval(loadManifest, CFG.manifest_refresh_ms);
@@ -199,15 +207,46 @@
     return p;
   }
 
+  function recentDelta(p, now) {
+    const d = parseD(p.d);
+    return d ? Math.floor((now - new Date(d.y, d.mo - 1, d.da)) / 86400000) : null;
+  }
+  function buildRecentPool() {
+    const now = new Date(); now.setHours(0, 0, 0, 0);
+    const pool = all.filter(p => {
+      const days = recentDelta(p, now);
+      return days != null && days >= 0 && days <= CFG.recent_days && (!p.pool || p.pool === "recent");
+    });
+    recentDeck = shuffle(pool);
+    return pool.length;
+  }
+  function recentShareNow() {
+    if (!recentDeck.length && !buildRecentPool()) return 0;
+    return CFG.recent_share * Math.min(1, recentDeck.length / CFG.recent_min_pool);
+  }
+  function takeRecent(wantPortrait) {
+    const i = wantPortrait == null ? 0 : recentDeck.findIndex(p => isPortrait(p) === wantPortrait);
+    if (i < 0) return null;
+    return recentDeck.splice(i, 1)[0];
+  }
+
+  function takeBase(wantPortrait) {
+    if (!deck.length) deck = shuffle(all.filter(p => !p.pool || p.pool === "random"));
+    const i = wantPortrait == null ? 0 : deck.findIndex(p => isPortrait(p) === wantPortrait);
+    return i < 0 ? null : deck.splice(i, 1)[0];
+  }
+
   function draw() {                    // next 1-2 photos forming one slide
-    if (!deck.length) deck = shuffle(all.slice());
-    if (!deck.length) return null;
-    const fromAnniv = Math.random() < annivShareNow();
-    const first = fromAnniv ? (takeAnniv(null) || deck.shift()) : deck.shift();
+    if (!all.length) return null;
+    const recentShare = recentShareNow(), annivShare = annivShareNow();
+    const roll = Math.random();
+    const source = roll < recentShare ? "recent" : roll < recentShare + annivShare ? "anniv" : "random";
+    const take = source === "recent" ? takeRecent : source === "anniv" ? takeAnniv : takeBase;
+    const first = take(null) || takeBase(null) || takeRecent(null) || takeAnniv(null);
+    if (!first) return null;
     if (!isPortrait(first)) return { kind: "full", ph: [first] };
-    // portrait partner: themed pair from the anniv deck when leading with one
-    const partner = (fromAnniv && takeAnniv(true)) ||
-      (j => j >= 0 ? deck.splice(j, 1)[0] : null)(deck.findIndex(isPortrait));
+    // Pair portraits from the same content pool when possible.
+    const partner = take(true) || takeBase(true) || takeRecent(true) || takeAnniv(true);
     if (partner) return { kind: "pair", ph: [first, partner] };
     return { kind: "solo", ph: [first] };
   }

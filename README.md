@@ -22,4 +22,23 @@ Built for a repurposed Facebook Portal Mini running a Home Assistant dashboard.
 Manifest format: `{"photos":[{"f":"img.jpg","w":4032,"h":3024,"d":"2025-06-14","loc":"Carlsbad, California"}]}`
 `f` may also be an absolute URL.
 
+## Immich source
+
+`tools/immich-sync.py` keeps a bounded 2,000-preview cache from one Immich
+album rather than mirroring originals. The default mix is 25% photos from the
+last 90 days, 30% photos captured within ±14 calendar days in past years, and
+45% stable weekly-random memories. The browser rechecks date eligibility, so
+seasonal photos automatically leave rotation as the calendar window moves.
+
+Credentials live only on the LXC in `/etc/hearth-frame/immich.env` (mode 600):
+
+```sh
+IMMICH_URL=http://immich-host:2283
+IMMICH_API_KEY=...
+IMMICH_ALBUM_ID=...
+```
+
+Run with `/opt/frame/frame-sync-immich.sh`. The deployed cron definition in
+`ops/frame-sync.cron` refreshes it nightly at 04:15.
+
 MIT.

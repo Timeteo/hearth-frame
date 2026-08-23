@@ -1,0 +1,2 @@
+# hearth-frame Immich bounded-cache refresh — nightly at 04:15 local LXC time.
+15 4 * * * root /opt/frame/frame-sync-immich.sh
