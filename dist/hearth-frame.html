@@ -98,9 +98,15 @@
 
   const $ = id => document.getElementById(id);
 
+  // The Portal's old Android build can lose network time on an isolated VLAN.
+  // Anchor display/calendar logic to nginx's HTTP Date header while retaining
+  // the device's correct timezone for local formatting.
+  let serverOffsetMs = 0;
+  const now = () => new Date(Date.now() + serverOffsetMs);
+
   /* ---------- clock ---------- */
   function tick() {
-    const d = new Date();
+    const d = now();
     let h = d.getHours(); const ap = h >= 12 ? "PM" : "AM";
     $("tt").textContent = (h % 12 || 12) + ":" + String(d.getMinutes()).padStart(2, "0");
     $("ap").textContent = ap;
@@ -119,7 +125,7 @@
     fetch(CFG.weather_json + "?t=" + Date.now())
       .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(w => {
-        if ((Date.now() / 1000) - (w.ts || 0) > 2 * 3600) throw new Error("stale");
+        if (((Date.now() + serverOffsetMs) / 1000) - (w.ts || 0) > 2 * 3600) throw new Error("stale");
         const cond = COND[w.cond] || w.cond;
         const hl = (w.hi != null && w.lo != null)
           ? `<span class="dot">·</span><span class="hl">H ${w.hi}° · L ${w.lo}°</span>` : "";
@@ -147,7 +153,12 @@
   }
   function loadManifest() {
     return fetch(CFG.manifest + "?t=" + Date.now())
-      .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(r => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const serverTime = Date.parse(r.headers.get("Date") || "");
+        if (Number.isFinite(serverTime)) serverOffsetMs = serverTime - Date.now();
+        return r.json();
+      })
       .then(m => { all = m.photos || m; deck = []; recentDeck = []; annivDay = ""; })
       .catch(() => {});
   }
@@ -173,13 +184,13 @@
     return Math.round((now - new Date(d.y, d.mo - 1, d.da)) / (365.25 * 86400000));
   }
   function buildAnnivPool() {
-    const now = new Date(); now.setHours(0, 0, 0, 0);
-    annivDay = now.toDateString();
+    const today = now(); today.setHours(0, 0, 0, 0);
+    annivDay = today.toDateString();
     const byDate = {};
     for (const p of all) {
-      const dt = annivDelta(p, now);
+      const dt = annivDelta(p, today);
       if (dt == null || dt > CFG.anniv_window_days) continue;
-      if (yearsAgo(p, now) < 1) continue;          // this year's photos aren't anniversaries
+      if (yearsAgo(p, today) < 1) continue;          // this year's photos aren't anniversaries
       (byDate[p.d] = byDate[p.d] || []).push(p);
     }
     const pool = [];
@@ -193,7 +204,7 @@
   }
   let annivPoolSize = 0;
   function annivShareNow() {                        // rebuilds pool on day change / manifest refresh
-    if (new Date().toDateString() !== annivDay) buildAnnivPool();
+    if (now().toDateString() !== annivDay) buildAnnivPool();
     if (!annivPoolSize) return 0;                   // nothing near this date — pure uniform mode
     if (!annivDeck.length) buildAnnivPool();        // cycled through: reshuffle for the rest of the day
     return CFG.anniv_share * Math.min(1, annivDeck.length / CFG.anniv_min_pool);
@@ -212,9 +223,9 @@
     return d ? Math.floor((now - new Date(d.y, d.mo - 1, d.da)) / 86400000) : null;
   }
   function buildRecentPool() {
-    const now = new Date(); now.setHours(0, 0, 0, 0);
+    const today = now(); today.setHours(0, 0, 0, 0);
     const pool = all.filter(p => {
-      const days = recentDelta(p, now);
+      const days = recentDelta(p, today);
       return days != null && days >= 0 && days <= CFG.recent_days && (!p.pool || p.pool === "recent");
     });
     recentDeck = shuffle(pool);
@@ -263,8 +274,8 @@
     const loc = p.loc ? `<div class="loc"><span class="pin">◆</span>${esc(p.loc)}</div>` : "";
     let date = fmtDate(p.d);
     if (date) {
-      const now = new Date(); now.setHours(0, 0, 0, 0);
-      const dt = annivDelta(p, now), yrs = yearsAgo(p, now);
+      const today = now(); today.setHours(0, 0, 0, 0);
+      const dt = annivDelta(p, today), yrs = yearsAgo(p, today);
       if (dt != null && dt <= CFG.anniv_window_days && yrs >= 1)
         date += ` <span class="ago">· ${yrs} ${yrs === 1 ? "YEAR" : "YEARS"} AGO</span>`;
     }
