@@ -45,6 +45,33 @@
   #metaL .date { font-size:14px; }
   .meta.pairhalf .loc { font-size:18px; }
   .meta.pairhalf .date { font-size:14px; }
+
+  /* ---------- approach controls ----------
+     Walking up (kitchen mmWave zone 1) fades these in over the photo. The photo
+     itself never changes on approach - only what you can do with it. See
+     portal-active-decisions.md A.10. */
+  #ctl { position:absolute; inset:0; opacity:0; transition:opacity .45s ease;
+    pointer-events:none; }
+  #ctl.on { opacity:1; pointer-events:auto; }
+  .navz { position:absolute; top:0; bottom:0; width:22%; }
+  .navz.l { left:0; } .navz.r { right:0; }
+  .chev { position:absolute; top:50%; transform:translateY(-50%);
+    width:74px; height:74px; border-radius:50%;
+    background:rgba(14,16,20,.46); border:1px solid rgba(255,255,255,.16);
+    color:rgba(255,255,255,.92); font-size:34px; line-height:72px; text-align:center; }
+  .navz.l .chev { left:34px; } .navz.r .chev { right:34px; }
+  .chev.off { opacity:.22; }
+  #bar { position:absolute; left:50%; transform:translateX(-50%); bottom:38px;
+    display:flex; align-items:center; gap:8px;
+    background:rgba(14,16,20,.52); border:1px solid rgba(255,255,255,.14);
+    border-radius:26px; padding:9px 13px; }
+  #bar button { -webkit-appearance:none; appearance:none; border:0; background:transparent;
+    color:rgba(255,255,255,.93); font-family:inherit; font-size:16px; font-weight:500;
+    letter-spacing:.02em; padding:7px 15px; border-radius:19px; }
+  #bar button.prim { background:rgba(255,178,122,.94); color:#20150c; font-weight:600; }
+  #bar button.prim.err { background:rgba(214,84,72,.94); color:#fff; }
+  #bar .sep { width:1px; height:22px; background:rgba(255,255,255,.18); }
+  #pos { font-size:13px; color:rgba(255,255,255,.5); padding:0 6px; letter-spacing:.06em; }
 </style>
 </head>
 <body>
@@ -58,6 +85,17 @@
   </div>
   <div class="meta" id="metaL"></div>
   <div class="meta" id="metaR"></div>
+  <div id="ctl">
+    <div class="navz l" id="zl"><div class="chev" id="cl">‹</div></div>
+    <div class="navz r" id="zr"><div class="chev" id="cr">›</div></div>
+    <div id="bar">
+      <button id="bPrev">Back</button>
+      <span id="pos"></span>
+      <button id="bNext">Next</button>
+      <span class="sep"></span>
+      <button id="bDash" class="prim">Dashboard</button>
+    </div>
+  </div>
 
 <script>
 (() => {
@@ -67,6 +105,15 @@
     // the frame server proxies it same-origin at frame/weather.json.
     // No tokens: only non-sensitive weather data is fetched.
     weather_json: "frame/weather.json",
+    // Same file also carries `near` (kitchen mmWave zone 1 occupied, 0/1), so the
+    // approach controls need no second endpoint. Polled fast; the file is tiny.
+    presence_poll_ms: 1500,
+    presence_stale_s: 120,     // no fresh publish for this long => assume nobody there
+    controls_linger_ms: 12000, // keep controls up this long after the last touch
+    history_max: 40,           // slides you can walk back through
+    // Tokenless local webhook -> automation.portal_frame_summon_dashboard_webhook
+    // -> button.kitchen_screen_go_to_dashboard. Fire-and-forget (no-cors).
+    dashboard_webhook: "https://hal.frigga.win/api/webhook/portal-frame-show-dashboard",
     dwell_ms: 60000,
     fade_ms: 1400,
     weather_refresh_ms: 15 * 60 * 1000,
@@ -120,20 +167,25 @@
     pouring: "Pouring", rainy: "Rain", snowy: "Snow", "snowy-rainy": "Wintry Mix",
     sunny: "Sunny", windy: "Windy", "windy-variant": "Windy", exceptional: "Alert",
   };
-  function refreshWeather() {
+  // The feed carries both weather and presence. Weather tolerates 2h of staleness;
+  // presence must not - a stale `near:1` would pin the controls up forever.
+  let nearNow = false;
+  function refreshFeed() {
     const el = $("wline");
     fetch(CFG.weather_json + "?t=" + Date.now())
       .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(w => {
-        if (((Date.now() + serverOffsetMs) / 1000) - (w.ts || 0) > 2 * 3600) throw new Error("stale");
+        const age = ((Date.now() + serverOffsetMs) / 1000) - (w.ts || 0);
+        setNear(w.near === 1 && age <= CFG.presence_stale_s);
+        if (age > 2 * 3600) throw new Error("stale");
         const cond = COND[w.cond] || w.cond;
         const hl = (w.hi != null && w.lo != null)
           ? `<span class="dot">·</span><span class="hl">H ${w.hi}° · L ${w.lo}°</span>` : "";
         el.innerHTML = `<span class="deg">${w.t}°</span> ${cond}${hl}`;
       })
-      .catch(() => { el.innerHTML = ""; });
+      .catch(() => { el.innerHTML = ""; setNear(false); });
   }
-  setInterval(refreshWeather, CFG.weather_refresh_ms); refreshWeather();
+  setInterval(refreshFeed, CFG.presence_poll_ms); refreshFeed();
 
   /* ---------- photo deck ---------- */
   let deck = [];        // shuffled photo entries not yet shown
@@ -291,13 +343,19 @@
     })));
   }
 
+  /* ---------- slide history ----------
+     Every rendered slide is kept so "Back" can reach a photo you caught a glimpse
+     of just before a transition. `pos` is where we are inside history; stepping
+     forward off the end draws a new slide. */
   let front = $("sA"), back = $("sB");
-  function advance() {
-    const s = draw();
-    if (!s) { setTimeout(advance, 30000); loadManifest(); return; }
+  let history = [];
+  let pos = -1;
+  let timer = null;
+
+  function render(s) {
     const urls = s.ph.map(src);
-    preload(urls).then(ok => {
-      if (ok.some(x => !x)) { advance(); return; }   // skip broken files
+    return preload(urls).then(ok => {
+      if (ok.some(x => !x)) return false;             // broken files: caller retries
       back.className = "slide " + s.kind;
       back.innerHTML = s.kind === "pair"
         ? `<img class="l" src="${esc(urls[0])}"><img class="r" src="${esc(urls[1])}">`
@@ -315,10 +373,139 @@
         mR.innerHTML = metaHtml(s.ph[0]); mR.className = "meta";
         mR.style.display = mR.innerHTML ? "block" : "none";
       }
-      setTimeout(advance, CFG.dwell_ms);
+      return true;
     });
   }
-  loadManifest().then(advance);
+
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(() => step(1, true), CFG.dwell_ms);
+  }
+
+  // dir: +1 forward, -1 back. auto: this was the dwell timer, not a person.
+  function step(dir, auto) {
+    if (dir < 0) {
+      if (pos <= 0) { paint(); return; }
+      pos--;
+      render(history[pos]).then(paint);
+      if (!auto) schedule();
+      return;
+    }
+    if (pos < history.length - 1) {                    // replay forward through history
+      pos++;
+      render(history[pos]).then(paint);
+      schedule();                                      // always re-arm: an auto replay that skipped this froze the frame
+      return;
+    }
+    const s = draw();
+    if (!s) { clearTimeout(timer); timer = setTimeout(() => step(1, true), 30000); loadManifest(); return; }
+    render(s).then(ok => {
+      if (!ok) { step(1, auto); return; }              // skip broken, draw another
+      history.push(s);
+      if (history.length > CFG.history_max) history.shift();
+      pos = history.length - 1;
+      paint();
+    });
+    schedule();
+  }
+
+  /* ---------- approach controls ---------- */
+  const ctl = $("ctl");
+  let touchedAt = 0;
+
+  function paint() {                                   // refresh control affordances
+    $("cl").className = "chev" + (pos > 0 ? "" : " off");
+    $("pos").textContent = pos > 0 ? (pos + 1) + " / " + history.length : "";
+  }
+
+  // ?ctl=1 pins the controls up: lets the controls be inspected on-device without
+  // standing in the kitchen. Not used in normal operation.
+  const forceCtl = /[?&]ctl=1/.test(location.search);
+  function controlsShouldShow() {
+    return forceCtl || nearNow || (Date.now() - touchedAt) < CFG.controls_linger_ms;
+  }
+  function syncControls() {
+    ctl.classList.toggle("on", controlsShouldShow());
+  }
+  // The webhook goes out over TLS to the reverse proxy, and this WebView is slow to
+  // set that up cold - which is the whole delay when you tap Dashboard. Warm the
+  // connection the moment someone walks up, so the tap reuses it.
+  let warmedAt = 0;
+  function warmDashboardLink() {
+    if (Date.now() - warmedAt < 60000) return;
+    warmedAt = Date.now();
+    fetch(CFG.dashboard_webhook, { method: "HEAD", mode: "no-cors" }).catch(() => {});
+  }
+
+  function setNear(v) {
+    if (v === nearNow) return;
+    nearNow = v;
+    if (v) warmDashboardLink();
+    syncControls();
+  }
+  setInterval(syncControls, 1000);
+
+  function touched() { touchedAt = Date.now(); syncControls(); }
+
+  function bind(id, fn) {
+    const el = $(id);
+    // Both events: the old WebView fires touchend reliably, click sometimes lags.
+    el.addEventListener("touchend", e => { e.preventDefault(); e.stopPropagation(); touched(); fn(); }, false);
+    el.addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); touched(); fn(); }, false);
+  }
+  bind("bPrev", () => step(-1, false));
+  bind("bNext", () => step(1, false));
+  bind("zl", () => step(-1, false));
+  bind("zr", () => step(1, false));
+  bind("bDash", showDashboard);
+
+  let dashResetTimer = 0;
+  function showDashboard() {
+    // Acknowledge the tap immediately - the round trip is not instant and a button
+    // that looks dead gets pressed twice.
+    const b = $("bDash");
+    const label = (text, ms) => {
+      b.textContent = text;
+      clearTimeout(dashResetTimer);
+      dashResetTimer = setTimeout(() => {
+        b.textContent = "Dashboard";
+        b.classList.remove("err");
+      }, ms);
+    };
+    b.classList.remove("err");
+    label("Opening…", 4000);
+    // no-cors: HA's webhook sends no CORS headers and we do not need the reply.
+    // An opaque response still means the request arrived; a network failure
+    // (firewall rule, DNS, proxy down) rejects. A firewall that silently drops
+    // packets never answers at all, so the abort timer turns a hang into an error.
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 8000);
+    fetch(CFG.dashboard_webhook, { method: "POST", mode: "no-cors", body: "{}", signal: ac.signal })
+      .then(() => clearTimeout(t))
+      .catch((e) => {
+        clearTimeout(t);
+        console.warn("[hearth-frame] dashboard webhook failed:", e && e.name, e && e.message);
+        b.classList.add("err");
+        label("Can't reach Home Assistant", 6000);
+      });
+  }
+
+  // Swipe anywhere: right-to-left = next, left-to-right = back.
+  let sx = 0, sy = 0, st = 0;
+  document.addEventListener("touchstart", e => {
+    const t = e.changedTouches[0];
+    sx = t.clientX; sy = t.clientY; st = Date.now();
+    touched();
+  }, false);
+  document.addEventListener("touchend", e => {
+    const t = e.changedTouches[0];
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Date.now() - st > 700) return;                 // slow drag is not a swipe
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+    step(dx < 0 ? 1 : -1, false);
+  }, false);
+
+  loadManifest().then(() => { step(1, true); });
 })();
 </script>
 </body>
